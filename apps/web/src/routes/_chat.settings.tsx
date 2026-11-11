@@ -118,29 +118,34 @@ function SettingsContentLayout() {
   const [restoreSignal, setRestoreSignal] = useState(0);
 
   return (
-    <AppRouteModal label="Settings">
-      <div className="relative flex min-h-0 flex-1">
-        <SettingsSidebarNav pathname={location.pathname} />
-        <div {...contentArea} className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header className="flex h-12 shrink-0 items-center gap-3 border-b ps-5 pe-2">
-            <SettingsBreadcrumb pathname={location.pathname} />
-            <div className="ms-auto flex shrink-0 items-center gap-1">
-              {location.pathname === "/settings/general" ? (
-                <RestoreDeviceDefaultsButton
-                  onRestored={() => setRestoreSignal((value) => value + 1)}
-                />
-              ) : null}
-              <AppRouteModalClose />
+    <SettingsUndoProvider key={JSON.stringify(search)}>
+      <AppRouteModal label="Settings">
+        <div className="relative flex min-h-0 flex-1">
+          <SettingsSidebarNav pathname={location.pathname} />
+          <div {...contentArea} className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <header className="flex h-12 shrink-0 items-center gap-3 border-b ps-5 pe-2">
+              <SettingsBreadcrumb pathname={location.pathname} />
+              <div className="ms-auto flex shrink-0 items-center gap-1">
+                {location.pathname === "/settings/general" ? (
+                  <RestoreDeviceDefaultsButton
+                    onRestored={() => setRestoreSignal((value) => value + 1)}
+                  />
+                ) : null}
+                <AppRouteModalClose />
+              </div>
+            </header>
+            <div
+              key={`${contentScopeKey}:${restoreSignal}`}
+              className="min-h-0 flex flex-1 flex-col"
+            >
+              <SettingsScopeBoundary pathname={location.pathname}>
+                <Outlet />
+              </SettingsScopeBoundary>
             </div>
-          </header>
-          <div key={`${contentScopeKey}:${restoreSignal}`} className="min-h-0 flex flex-1 flex-col">
-            <SettingsScopeBoundary pathname={location.pathname}>
-              <Outlet />
-            </SettingsScopeBoundary>
           </div>
         </div>
-      </div>
-    </AppRouteModal>
+      </AppRouteModal>
+    </SettingsUndoProvider>
   );
 }
 
@@ -166,9 +171,7 @@ function SettingsRouteLayout() {
         });
       }}
     >
-      <SettingsUndoProvider key={JSON.stringify(rawSearch)}>
-        <SettingsContentLayout />
-      </SettingsUndoProvider>
+      <SettingsContentLayout />
     </SettingsScopeProvider>
   );
 }

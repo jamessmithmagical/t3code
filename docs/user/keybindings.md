@@ -182,6 +182,12 @@ seconds after the latest action. Right after an action, the shortcut works even
 in a text field such as the composer. Once you type or press another key, the
 field gets its own undo back. Terminals always keep their native shortcut.
 
+In Settings, `mod+z` undoes preference changes from the current visit, including
+appearance, chat, diff, and project defaults. Text fields keep their native text
+undo; move focus outside the field to undo a saved preference. Closing Settings
+or changing its project/environment target clears the history. Credentials,
+keybinding edits, and resource-management actions are not included.
+
 `navigation.back` (`mod+[` by default) and `navigation.forward` (`mod+]`) move
 through the pages you have visited, like a browser's back and forward buttons.
 
