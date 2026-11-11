@@ -706,12 +706,12 @@ export const make = Effect.gen(function* () {
     window.webContents.on("before-input-event", (event, input) => {
       quitShortcutHandler(event, input);
       if (window.isDestroyed()) return;
-      // Cmd/Ctrl+W reaches the renderer; DevTools uses the native menu shortcut.
+      // The renderer owns close and undo; editable fields keep Chromium's native undo.
       window.webContents.setIgnoreMenuShortcuts(
         (environment.platform === "darwin" ? input.meta : input.control) &&
           !input.alt &&
           !input.shift &&
-          input.key.toLowerCase() === "w",
+          (input.key.toLowerCase() === "w" || input.key.toLowerCase() === "z"),
       );
       // A held Cmd/Ctrl+W closes one tab or terminal, not each one behind it.
       if (input.type !== "keyDown" || !input.isAutoRepeat) return;

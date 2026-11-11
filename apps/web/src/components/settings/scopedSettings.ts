@@ -1,5 +1,6 @@
 import {
   ClientSettingsSchema,
+  type ClientSettings,
   type ClientSettingsPatch,
   type EnvironmentId,
   globalIdleCompaction,
@@ -23,6 +24,7 @@ import {
 } from "@t3tools/shared/projectSettings";
 import * as Equal from "effect/Equal";
 import * as Cause from "effect/Cause";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import type { ResolvedSettingsScope } from "./settingsScope";
 
@@ -40,6 +42,14 @@ interface ScopedSettingsEnvironment {
 const SERVER_KEYS = new Set<string>(Object.keys(ServerSettings.fields));
 const CLIENT_KEYS = new Set<string>(Object.keys(ClientSettingsSchema.fields));
 const PROJECT_SCOPED_KEYS = new Set<string>(PROJECT_SCOPED_SERVER_SETTING_KEYS);
+const ENTRY_MAPS = new Set([
+  "projectSettingsOverrides",
+  "usageLimitSources",
+  "textGenerators",
+  "secretProviders",
+  "usagePriceOverrides",
+  "usageModelAliases",
+]);
 
 export function isProjectScopedSettingKey(key: string): key is ProjectScopedServerSettingKey {
   return PROJECT_SCOPED_KEYS.has(key);
@@ -452,9 +462,9 @@ export async function persistScopedSettingsPatch(
     readonly cause?: Cause.Cause<unknown>;
     readonly value?: ServerSettings;
   }>,
-  persistClient: (patch: ClientSettingsPatch) => void,
+  persistClient: (patch: ClientSettingsPatch) => void | Promise<unknown>,
 ) {
-  if (plan.hasClientWrite) persistClient(plan.clientPatch);
+  if (plan.hasClientWrite) await persistClient(plan.clientPatch);
   const results = await Promise.allSettled(
     plan.serverWrites.map(({ environmentId, patch }) =>
       persistServer({ environmentId, input: { patch } }),
@@ -501,4 +511,62 @@ export async function persistScopedSettingsPatch(
     savedEnvironments,
     savedEnvironmentCount: savedEnvironments.length,
   };
+}
+
+export function reverseScopedSettingsPlan(
+  plan: ReturnType<typeof planScopedSettingsPatch>,
+  clientSettings: ClientSettings,
+): ReturnType<typeof planScopedSettingsPatch> {
+  const clientPatch = Object.fromEntries(
+    Object.entries(plan.clientPatch)
+      .filter(([key, next]) => !Equal.equals(next, clientSettings[key as keyof ClientSettings]))
+      .map(([key]) => [key, clientSettings[key as keyof ClientSettings]]),
+  );
+  return {
+    ...plan,
+    clientPatch,
+    hasClientWrite: Object.keys(clientPatch).length > 0,
+    serverWrites: plan.serverWrites
+      .map((write) => {
+        const next = applyServerSettingsPatch(write.previous, write.patch);
+        const patch = Object.fromEntries(
+          Object.entries(write.previous).flatMap(([key, before]) => {
+            const after = next[key as keyof ServerSettings];
+            if (Equal.equals(before, after)) return [];
+            const oldEntries: unknown = before;
+            const newEntries: unknown = after;
+            return [
+              [
+                key,
+                ENTRY_MAPS.has(key) && isPlainObject(oldEntries) && isPlainObject(newEntries)
+                  ? Object.fromEntries(
+                      [...new Set([...Object.keys(oldEntries), ...Object.keys(newEntries)])]
+                        .filter((id) => !Equal.equals(oldEntries[id], newEntries[id]))
+                        .map((id) => [id, oldEntries[id] ?? null]),
+                    )
+                  : before,
+              ],
+            ];
+          }),
+        ) as ServerSettingsPatch;
+        return { ...write, previous: next, patch };
+      })
+      .filter((write) => Object.keys(write.patch).length > 0),
+  };
+}
+
+export function scopedSettingsUndoIsCurrent(
+  write: ScopedServerWrite,
+  current: ServerSettings,
+): boolean {
+  return Object.entries(write.patch).every(([key, patch]) => {
+    const expected: unknown = write.previous[key as keyof ServerSettings];
+    const actual: unknown = current[key as keyof ServerSettings];
+    return ENTRY_MAPS.has(key) &&
+      isPlainObject(patch) &&
+      isPlainObject(expected) &&
+      isPlainObject(actual)
+      ? Object.keys(patch).every((id) => Equal.equals(expected[id], actual[id]))
+      : Equal.equals(expected, actual);
+  });
 }

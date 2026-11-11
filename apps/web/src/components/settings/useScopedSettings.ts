@@ -14,7 +14,15 @@ import {
   type UnifiedSettings,
 } from "@t3tools/contracts";
 
-import { persistClientSettingsPatch, useMergedSettings } from "../../hooks/useSettings";
+import {
+  ensureClientSettingsHydrated,
+  getClientSettings,
+  persistClientSettingsPatch,
+  persistClientSettingsUpdate,
+  useMergedSettings,
+} from "../../hooks/useSettings";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { useSettingsUndo } from "./SettingsUndo";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { toastManager } from "../ui/toast";
@@ -26,6 +34,8 @@ import {
   planScopedSettingsPatch,
   scopedSettingsAreMixed,
   scopedSettingsSource,
+  reverseScopedSettingsPlan,
+  scopedSettingsUndoIsCurrent,
   type ProjectOverrideEntry,
   type ScopedSettingsPatch,
 } from "./scopedSettings";
@@ -49,7 +59,8 @@ export function useScopedSettingSource(keys: readonly (keyof ServerSettings)[]) 
 
 function useRunScopedPlan() {
   const persistServer = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
-  return (plan: ReturnType<typeof planScopedSettingsPatch>, onFailed?: () => void) => {
+  const history = useSettingsUndo();
+  const save = async (plan: ReturnType<typeof planScopedSettingsPatch>, onFailed?: () => void) => {
     if (plan.unavailableReason) {
       toastManager.add({
         type: "warning",
@@ -57,9 +68,9 @@ function useRunScopedPlan() {
         description: plan.unavailableReason,
       });
       onFailed?.();
-      return;
+      return null;
     }
-    void persistScopedSettingsPatch(
+    const result = await persistScopedSettingsPatch(
       plan,
       async (request) => {
         const missing = requiredScopesForServerSettingsPatch(request.input.patch).find(
@@ -74,11 +85,23 @@ function useRunScopedPlan() {
               }),
             ),
           );
-        return persistServer(request);
+        const result = await persistServer(request);
+        if (result._tag === "Success" && history) {
+          history.settings.set(request.environmentId, {
+            observed: appAtomRegistry.get(
+              serverEnvironment.settingsValueAtom(request.environmentId),
+            ),
+            saved: result.value,
+          });
+        }
+        return result;
       },
-      persistClientSettingsPatch,
-    ).then(({ failedEnvironments, savedEnvironments, savedEnvironmentCount }) => {
-      if (failedEnvironments.length === 0) return;
+      history
+        ? (patch) => persistClientSettingsUpdate((current) => ({ ...current, ...patch }))
+        : persistClientSettingsPatch,
+    );
+    const { failedEnvironments, savedEnvironments, savedEnvironmentCount } = result;
+    if (failedEnvironments.length > 0) {
       onFailed?.();
       toastManager.add({
         type: "error",
@@ -93,36 +116,115 @@ function useRunScopedPlan() {
             : []),
         ].join("\n"),
       });
-    });
+    }
+    return result;
+  };
+  return (makePlan: () => ReturnType<typeof planScopedSettingsPatch>, onFailed?: () => void) => {
+    if (!history) {
+      void save(makePlan(), onFailed);
+      return;
+    }
+    history.record(async () => {
+      await ensureClientSettingsHydrated();
+      const plan = makePlan();
+      const reverse = reverseScopedSettingsPlan(plan, getClientSettings());
+      const result = await save(plan, onFailed);
+      if (!result) return null;
+      // Secret values in streamed settings are redacted and cannot be restored.
+      if (
+        plan.serverWrites.some(
+          ({ patch }) =>
+            patch.secretProviders || patch.cloudSpeechCredentials || patch.sourceControlHosts,
+        )
+      )
+        return null;
+      const saved = new Set(result.savedEnvironments.map((write) => write.environmentId));
+      const undoPlan = {
+        ...reverse,
+        serverWrites: reverse.serverWrites
+          .filter((write) => saved.has(write.environmentId))
+          .map((write) => ({
+            ...write,
+            previous: history.settings.get(write.environmentId)?.saved ?? write.previous,
+          })),
+      };
+      if (!undoPlan.hasClientWrite && undoPlan.serverWrites.length === 0) return null;
+      return async () => {
+        if (
+          undoPlan.serverWrites.some((write) => {
+            const observed = appAtomRegistry.get(
+              serverEnvironment.settingsValueAtom(write.environmentId),
+            );
+            const cached = history.settings.get(write.environmentId);
+            const current = cached?.observed === observed ? cached.saved : observed;
+            return current !== null && !scopedSettingsUndoIsCurrent(write, current);
+          })
+        ) {
+          toastManager.add({
+            type: "warning",
+            title: "Setting changed elsewhere",
+            description: "Undo skipped to keep the newer change.",
+          });
+          return true;
+        }
+        const undone = await save(undoPlan);
+        if (!undone) return false;
+        const failed = new Set(undone.failedEnvironments.map((write) => write.environmentId));
+        undoPlan.serverWrites = undoPlan.serverWrites.filter((write) =>
+          failed.has(write.environmentId),
+        );
+        undoPlan.hasClientWrite = false;
+        return failed.size === 0;
+      };
+    }, onFailed);
   };
 }
 
+function useSettingsWriteEnvironments() {
+  const context = useOptionalSettingsScope();
+  const history = useSettingsUndo();
+  return () =>
+    (context?.environments ?? []).map((environment) => {
+      const observed = appAtomRegistry.get(
+        serverEnvironment.settingsValueAtom(environment.environmentId),
+      );
+      const cached = history?.settings.get(environment.environmentId);
+      const settings = cached?.observed === observed ? cached.saved : observed;
+      return settings && environment.serverConfig
+        ? { ...environment, serverConfig: { ...environment.serverConfig, settings } }
+        : environment;
+    });
+}
+
 export function useUpdateScopedSettings() {
-  const { scope, environments } = useSettingsScope();
+  const { scope } = useSettingsScope();
+  const environments = useSettingsWriteEnvironments();
   const run = useRunScopedPlan();
   /** `onFailed` runs when any target rejects or drops the patch, so a draft can fall back. */
   return (patch: ScopedSettingsPatch, options?: { readonly onFailed?: () => void }) =>
-    run(planScopedSettingsPatch(scope, environments, patch), options?.onFailed);
+    run(() => planScopedSettingsPatch(scope, environments(), patch), options?.onFailed);
 }
 
 export function useClearScopedSettings() {
   const context = useOptionalSettingsScope();
+  const environments = useSettingsWriteEnvironments();
   const run = useRunScopedPlan();
   return (keys: readonly ProjectScopedServerSettingKey[]) => {
     if (context === null) return;
-    run(planScopedSettingsClear(context.scope, context.environments, keys));
+    run(() => planScopedSettingsClear(context.scope, environments(), keys));
   };
 }
 
 export function useClearProjectOverrides() {
   const context = useOptionalSettingsScope();
+  const environments = useSettingsWriteEnvironments();
   const run = useRunScopedPlan();
   return (
     entries: readonly ProjectOverrideEntry[],
     keys: readonly ProjectScopedServerSettingKey[],
   ) => {
     if (context === null) return;
-    run(planProjectOverridesClear(context.environments, entries, keys));
+    run(() => planProjectOverridesClear(environments(), entries, keys));
   };
 }
 

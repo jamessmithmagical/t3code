@@ -8,6 +8,7 @@ import { useSettingsRestore } from "../components/settings/SettingsPanels";
 import { AppRouteModal, AppRouteModalClose } from "../components/AppRouteModal";
 import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
 import { SettingsSidebarNav } from "../components/settings/SettingsSidebarNav";
+import { SettingsUndoProvider } from "../components/settings/SettingsUndo";
 import {
   SettingsScopeProvider,
   useSettingsScope,
@@ -165,7 +166,9 @@ function SettingsRouteLayout() {
         });
       }}
     >
-      <SettingsContentLayout />
+      <SettingsUndoProvider key={JSON.stringify(rawSearch)}>
+        <SettingsContentLayout />
+      </SettingsUndoProvider>
     </SettingsScopeProvider>
   );
 }

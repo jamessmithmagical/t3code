@@ -693,6 +693,9 @@ describe("DesktopWindow", () => {
         );
         beforeInput(event, { ...input, key: "r", isAutoRepeat: false });
         assert.isFalse(fakeWindow.setIgnoreMenuShortcuts.mock.lastCall?.[0]);
+        beforeInput(event, { ...input, key: "z", isAutoRepeat: false });
+        assert.isTrue(fakeWindow.setIgnoreMenuShortcuts.mock.lastCall?.[0]);
+        assert.isFalse(prevented);
       }).pipe(Effect.provide(layer));
     }),
   );

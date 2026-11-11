@@ -5,6 +5,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   type ServerSettings,
+  type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
@@ -24,6 +25,8 @@ import {
   selectScopedSettingsEnvironments,
 } from "./scopedSettings";
 import { resolveSettingsScope } from "./settingsScope";
+import { reverseScopedSettingsPlan, scopedSettingsUndoIsCurrent } from "./scopedSettings";
+import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 
 function environment(
   id: string,
@@ -142,6 +145,71 @@ describe("scoped settings targets", () => {
 });
 
 describe("scoped settings writes", () => {
+  it.each<ServerSettingsPatch>([
+    { storageCleanup: { logsAfterDays: 3 } },
+    { backgroundActivityProfile: "performance" },
+    { idleCompaction: "off" },
+    { worktreeCleanup: { mode: "custom", rules: { worktreeOnDelete: true } } },
+    {
+      defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
+    },
+    { usageModelAliases: { "test-model": "other-model" } },
+  ])("round-trips a preference patch through the server's actual merge rules: %j", (patch) => {
+    const plan = planScopedSettingsPatch(named, environments, patch);
+    const undo = reverseScopedSettingsPlan(plan, DEFAULT_CLIENT_SETTINGS);
+    for (const write of plan.serverWrites) {
+      const inverse = undo.serverWrites.find(
+        (entry) => entry.environmentId === write.environmentId,
+      );
+      const restored = applyServerSettingsPatch(
+        applyServerSettingsPatch(write.previous, write.patch),
+        inverse?.patch ?? {},
+      );
+      expect(restored).toEqual(applyServerSettingsPatch(write.previous, {}));
+    }
+  });
+  it("undoes only the edited preferences and restores each target's own override state", () => {
+    const targets = [
+      laptop,
+      environment("Server", {
+        settings: applyServerSettingsPatch(
+          {
+            ...DEFAULT_SERVER_SETTINGS,
+            defaultAutoPull: true,
+            projectSettingsOverrides: {
+              [projectId]: { defaultAutoPull: false, branchNamePrefix: "project-before" },
+            },
+          },
+          {},
+        ),
+      }),
+    ];
+    for (const scope of [all, project]) {
+      const plan = planScopedSettingsPatch(scope, targets, {
+        defaultAutoPull: true,
+        timestampFormat: "12-hour",
+      });
+      const undo = reverseScopedSettingsPlan(plan, DEFAULT_CLIENT_SETTINGS);
+      expect(undo.clientPatch).toEqual({
+        timestampFormat: DEFAULT_CLIENT_SETTINGS.timestampFormat,
+      });
+      for (const write of plan.serverWrites) {
+        const changed = applyServerSettingsPatch(write.previous, write.patch);
+        const unrelated = applyServerSettingsPatch(changed, { branchNamePrefix: "keep-me" });
+        const inverse = undo.serverWrites.find(
+          (entry) => entry.environmentId === write.environmentId,
+        );
+        if (inverse) {
+          expect(scopedSettingsUndoIsCurrent(inverse, unrelated)).toBe(true);
+          expect(scopedSettingsUndoIsCurrent(inverse, write.previous)).toBe(false);
+        }
+        const restored = applyServerSettingsPatch(unrelated, inverse?.patch ?? {});
+        expect(restored.defaultAutoPull).toEqual(write.previous.defaultAutoPull);
+        expect(restored.projectSettingsOverrides).toEqual(write.previous.projectSettingsOverrides);
+        expect(restored.branchNamePrefix).toBe("keep-me");
+      }
+    }
+  });
   it("edits the effective machine policy without changing other machines' rules", () => {
     const custom = environment("Laptop", {
       settings: {

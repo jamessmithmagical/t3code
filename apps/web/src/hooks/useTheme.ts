@@ -3,6 +3,7 @@ import type { DesktopBridge } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import * as Schema from "effect/Schema";
 import { useSyncExternalStore } from "react";
+import { useSettingsUndo } from "../components/settings/SettingsUndo";
 import {
   applyThemePalette,
   CUSTOM_THEMES_STORAGE_KEY,
@@ -640,8 +641,38 @@ export function refreshTheme({ preservePreview = false } = {}): void {
 }
 
 export function useTheme() {
+  const history = useSettingsUndo();
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const { theme, resolvedTheme } = snapshot;
+
+  const withUndo = <Args extends unknown[]>(change: (...args: Args) => boolean) => {
+    if (!history) return change;
+    return (...args: Args) => {
+      const keys = [STORAGE_KEY, THEME_APPEARANCE_MODE_STORAGE_KEY, THEME_HALVES_STORAGE_KEY];
+      let before: (string | null)[];
+      try {
+        before = keys.map((key) => window.localStorage.getItem(key));
+      } catch {
+        return change(...args);
+      }
+      if (!change(...args)) return false;
+      const after = keys.map((key) => window.localStorage.getItem(key));
+      if (before.some((value, index) => value !== after[index])) {
+        history.record(async () => () => {
+          if (keys.some((key, index) => window.localStorage.getItem(key) !== after[index]))
+            return true;
+          keys.forEach((key, index) => {
+            const value = before[index];
+            if (value === null || value === undefined) window.localStorage.removeItem(key);
+            else window.localStorage.setItem(key, value);
+          });
+          refreshTheme();
+          return true;
+        });
+      }
+      return true;
+    };
+  };
 
   const setFollowSystem = (nextFollowSystem: boolean): boolean => {
     const currentMode = readAppearanceModePreference(theme);
@@ -650,16 +681,16 @@ export function useTheme() {
       : currentMode === "system"
         ? (getThemePreferenceMode(theme) ?? "light")
         : currentMode;
-    return setAppearanceMode(nextMode);
+    return withUndo(setAppearanceMode)(nextMode);
   };
 
   return {
     theme,
-    setTheme,
-    setAppearanceMode,
+    setTheme: withUndo(setTheme),
+    setAppearanceMode: withUndo(setAppearanceMode),
     setFollowSystem,
-    setThemeHalf,
-    clearThemeHalves,
+    setThemeHalf: withUndo(setThemeHalf),
+    clearThemeHalves: withUndo(clearThemeHalves),
     refreshTheme,
     followSystem: snapshot.followSystem,
     appearanceMode: snapshot.appearanceMode,
